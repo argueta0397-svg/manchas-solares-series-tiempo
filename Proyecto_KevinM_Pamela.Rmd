@@ -1,0 +1,650 @@
+---
+title: ""
+output:
+  pdf_document:
+    latex_engine: xelatex
+fontsize: 11pt
+geometry: margin=2.5cm
+indent: true
+header-includes: |
+  \usepackage[spanish,es-tabla,es-noshorthands,es-nodecimaldot]{babel}
+  \usepackage{fontspec}
+  \IfFontExistsTF{Calibri}{\setmainfont{Calibri}}{\IfFontExistsTF{Carlito}{\setmainfont{Carlito}}{}}
+  \usepackage{amsmath}
+  \usepackage{float}
+  \floatstyle{plaintop}
+  \restylefloat{figure}
+  \usepackage{indentfirst}
+  \setlength{\parindent}{1.27cm}
+  \usepackage{titlesec}
+  \titleformat{\section}{\normalfont\fontsize{12}{14}\selectfont\bfseries\raggedright}{}{0em}{\MakeUppercase}
+  \titleformat{\subsection}{\normalfont\fontsize{11}{13}\selectfont\bfseries\raggedright}{}{0em}{}
+  \usepackage{caption}
+  \captionsetup{labelfont=bf, textfont=it, labelsep=newline, justification=raggedright, singlelinecheck=false}
+---
+
+```{r setup, include=FALSE}
+# El código no se muestra en el PDF, solo tablas y gráficos.
+# Los títulos de las figuras van arriba (APA 7).
+# El formato del artículo (Calibri, títulos, numeración de tablas y figuras)
+# solo funciona en PDF. Usar: Knit > Knit to PDF
+if (!knitr::is_latex_output()) {
+  stop("Este artículo se debe compilar a PDF: use Knit > Knit to PDF")
+}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, results = "hide",
+                      fig.align = "center", fig.pos = "H", fig.topcaption = TRUE,
+                      fig.width = 7, fig.height = 3.8, out.width = "85%")
+```
+
+```{r}
+# Librerias
+library(ggplot2)
+library(forecast)
+library(fpp2)
+library(astsa)
+library(car)
+library(dplyr)
+library(readxl)
+library(tseries)
+library(knitr)
+library(kableExtra)
+# Se quitaron TSA (cambiaba fitted() y plot() de los modelos Arima de forecast),
+# mgcv y urca (no se usaban) y el astsa repetido.
+```
+
+```{r}
+# Función para hacer las tablas en formato APA
+tabla_apa <- function(df, titulo, nota) {
+  kbl(df, booktabs = TRUE, caption = titulo, linesep = "", row.names = FALSE) %>%
+    kable_styling(latex_options = "hold_position", position = "center") %>%
+    footnote(general = nota, general_title = "Nota.", title_format = "italic",
+             footnote_as_chunk = TRUE, threeparttable = TRUE)
+}
+```
+
+```{r}
+# Datos
+datos= read_excel("data_final.xlsx")
+str(datos)
+```
+
+```{r}
+datos$Sunspot=as.numeric(datos$Sunspot)
+faltantes = sum(is.na(datos$Sunspot))
+ceros = sum(datos$Sunspot == 0, na.rm = TRUE)
+datos$Sunspot=datos$Sunspot+0.001
+```
+
+```{r}
+# Serie
+y= ts(datos$Sunspot, start=c(1749,1), frequency=12)
+```
+
+```{r}
+summary(datos)
+```
+
+```{r}
+# El periodograma se calcula aquí porque sus valores se usan en el resumen y la metodología
+x=datos$Sunspot
+x.spec=mvspec(x, log="no", plot=FALSE)
+frecuencia<-x.spec$freq[x.spec$spec==max(x.spec$spec)]
+spectro_orden <- x.spec$details %>% as.data.frame() %>% arrange(desc(spectrum))
+frecuencia1 <- spectro_orden$frequency[1]
+frecuencia2 <- spectro_orden$frequency[2]
+frecuencia3 <- spectro_orden$frequency[3]
+frecuencia4 <- spectro_orden$frequency[4]
+frecuencia5 <- spectro_orden$frequency[5]
+```
+
+```{=latex}
+\begin{center}
+{\fontsize{14}{17}\selectfont\bfseries Análisis del número medio mensual total de manchas solares, mediante modelos de series temporales\par}
+\vspace{0.4cm}
+{\fontsize{12}{14}\selectfont Kevin Andrey Montenegro Barboza, Pamela Argueta Dimas\par}
+\vspace{0.2cm}
+{\fontsize{12}{14}\selectfont kevin.montenegrobarboza@ucr.ac.cr, pamela.argueta@ucr.ac.cr\par}
+\end{center}
+\vspace{0.3cm}
+\begin{center}
+{\fontsize{12}{14}\selectfont\bfseries RESUMEN\par}
+\end{center}
+```
+
+```{r comparacion-prueba}
+# ------------------------------------------------------------------
+# Comparación de los finalistas con datos de prueba.
+# Se guardan los últimos 132 meses (aprox. un ciclo solar) como prueba
+# y se ajustan los cuatro finalistas solo con los datos de entrenamiento.
+# (Este bloque va antes del resumen para poder citar el error de pronóstico)
+# ------------------------------------------------------------------
+y_ent    = window(y, end = c(2015, 10))
+y_prueba = window(y, start = c(2015, 11))
+h = length(y_prueba)
+t_ent    = 1:length(y_ent)
+t_prueba = (length(y_ent) + 1):length(y)
+
+# Errores según las fórmulas del curso: e = observado - pronóstico
+errores = function(real, pron) {
+  e = as.numeric(real) - as.numeric(pron)
+  c(ME = mean(e), RMSE = sqrt(mean(e^2)), MAE = mean(abs(e)))
+}
+
+# 1. Suavizamiento exponencial simple
+ses_e = ses(y_ent, h = h, initial = "simple")
+
+# 2. ARMA(3,1)
+modb_e = Arima(y_ent, order = c(3, 0, 1))
+pron_modb = forecast(modb_e, h = h)
+
+# 3. Regresión de Fourier: las frecuencias se buscan solo con el entrenamiento
+x.spec_e = mvspec(as.numeric(y_ent), log = "no", plot = FALSE)
+frec_e = x.spec_e$freq[order(x.spec_e$spec, decreasing = TRUE)][1:5]
+senos_cosenos = function(tt, frecuencias) {
+  X = NULL
+  for (j in 1:length(frecuencias)) {
+    X = cbind(X, cos(2*pi*frecuencias[j]*tt), sin(2*pi*frecuencias[j]*tt))
+  }
+  colnames(X) = paste0(c("cos", "sin"), rep(1:length(frecuencias), each = 2))
+  X
+}
+xr_e = senos_cosenos(t_ent, frec_e)
+xr_p = senos_cosenos(t_prueba, frec_e)
+mod5_e = lm(y ~ ., data = data.frame(y = as.numeric(y_ent), xr_e))
+pron_mod5 = predict(mod5_e, newdata = data.frame(xr_p), interval = "prediction")
+
+# 4. Regresión de Fourier con errores ARMA(3,1)
+fit3_e = Arima(y_ent, xreg = xr_e, order = c(3, 0, 1))
+pron_fit3 = forecast(fit3_e, xreg = xr_p)
+
+comparativa = data.frame(
+  Familia = c("Suavizamiento exponencial", "ARIMA/SARIMA", "Regresión", "Regresión dinámica"),
+  Modelo  = c("SES", "ARMA(3,1)", "Fourier (5 frecuencias)", "Fourier + ARMA(3,1)"),
+  rbind(errores(y_prueba, ses_e$mean),
+        errores(y_prueba, pron_modb$mean),
+        errores(y_prueba, pron_mod5[, "fit"]),
+        errores(y_prueba, pron_fit3$mean))
+)
+ganador = comparativa$Modelo[which.min(comparativa$RMSE)]
+rmse_ganador = round(min(comparativa$RMSE), 2)
+mae_ganador = round(comparativa$MAE[which.min(comparativa$RMSE)], 2)
+```
+
+\noindent Las manchas solares son regiones oscuras de la fotosfera asociadas a la actividad magnética del Sol, cuyas variaciones influyen en fenómenos como las auroras y las radiocomunicaciones. Este estudio compara modelos de series temporales para describir y pronosticar el número medio mensual total de manchas solares, con datos del Solar Influences Data Analysis Center entre enero de 1749 y octubre de 2026. Se ajustó al menos un modelo de cada familia: suavizamiento exponencial (simple y Holt-Winters aditivo), ARIMA (ARMA(1,1), ARMA(2,1) y ARMA(3,1)), regresión con términos de Fourier y regresión dinámica con errores ARMA(p,1). El periodograma mostró un máximo en `r round(1/frecuencia, 1)` meses (≈ `r round(1/frecuencia/12, 1)` años), coherente con el ciclo solar de aproximadamente 11 años, por lo que la serie se trató como un ciclo cuasiperiódico. Dentro de cada familia los modelos se compararon mediante el RMSE, el MAE, el AIC y el BIC, y los cuatro finalistas se compararon por su error de pronóstico en los últimos 132 meses de la serie (noviembre 2015 a octubre 2026), que se reservaron como datos de prueba. El modelo elegido fue `r ganador`, que obtuvo el menor error de pronóstico (RMSE = `r rmse_ganador`; MAE = `r mae_ganador`). No obstante, los residuales de los modelos siguen autocorrelacionados según la prueba de Ljung-Box (p < 0.001), lo que indica que el ciclo solar aún no se captura por completo.
+
+```{=latex}
+\medskip
+\noindent{\fontsize{12}{14}\selectfont\bfseries PALABRAS CLAVE:} {\raggedright Ciclo de Schwabe, periodograma, regresión de Fourier, ARIMA, pronóstico.\par}
+```
+
+# INTRODUCCIÓN
+
+Una mancha solar es una región oscura denominada sombra o umbra, que está rodeada por una parte más clara o penumbra con filamentos claros y oscuros. Estos filamentos están cercados por los gránulos típicos de la fotósfera (Costa et al., s. f.). Las manchas solares tienen un amplio rango de tamaños, se pueden encontrar diámetros entre 60 mil km o más (Americo Mejía, 2009).
+
+La formación de una mancha solar se da porque los campos magnéticos se proyectan a través de gases calientes de la fotosfera y corresponden a regiones más frías que la superficie circundante. El problema es que los intensos campos magnéticos que se contraen forman columnas arqueadas de plasma que aparecen por encima de las regiones de manchas solares, y que pueden quedar suspendidas en la superficie solar durante varios días. Cuando esa energía acumulada se entrelaza, puede pasar que haya energía que se expulse violentamente y lance material fuera del sol en forma de erupción solar. Algunos ejemplos de la exposición de la Tierra a estas erupciones son algunas auroras y afectaciones en las radiocomunicaciones (Arsentiev et al., 2013). Por esto, pronosticar el número de manchas solares sirve para anticipar los periodos de mayor actividad solar, que pueden afectar satélites, comunicaciones y redes eléctricas (Hathaway, 2015).
+
+El número de manchas solares sube y baja siguiendo un ciclo de aproximadamente 11 años, conocido como ciclo de Schwabe (Hathaway, 2015). Por este comportamiento, esta serie se ha usado mucho en series temporales: Yule (1927) propuso los modelos autorregresivos precisamente para estudiar el número de manchas solares, Tong y Lim (1980) usaron modelos autorregresivos con umbral porque el ciclo sube más rápido de lo que baja, y también es un ejemplo común de análisis espectral con el periodograma (Shumway y Stoffer, 2017).
+
+El observatorio Solar Influences Data Analysis Center mantiene una base de datos sobre la media mensual total del número de manchas solares; es media mensual porque toman una media aritmética simple del número total diario de manchas solares durante todos los días de cada mes natural. Con los datos de enero de 1749 a octubre de 2026 se realizó un ajuste de modelos de series temporales según el tipo de familia: en suavizamiento exponencial se ajustó un modelo de suavizamiento exponencial simple y uno de Holt-Winters aditivo; en la familia ARIMA se ajustaron varios modelos ARMA; en regresión se ajustaron modelos con términos de Fourier, y en regresión dinámica se usó el modelo ganador de la regresión, pero modelando sus errores con algunos ARMA. El objetivo de este trabajo es elegir, entre los modelos de las cuatro familias, el que mejor pronostica el número medio mensual de manchas solares, comparando sus pronósticos con datos reales que no se usaron para ajustar los modelos, y con ese modelo realizar un pronóstico para los próximos cinco años.
+
+# METODOLOGÍA
+
+Los datos provienen del Solar Influences Data Analysis Center, que cuenta con bases de datos sobre el número medio mensual de manchas solares (Solar Influences Data Analysis Center, s. f.). La base de datos contiene el año, el mes y el número de manchas, además de otra información que no es necesaria para el análisis (Real Observatorio de Bélgica, 2015), y se descargó de <https://www.sidc.be/SILSO/datafiles>. La serie tiene `r length(y)` observaciones mensuales, `r faltantes` datos faltantes y `r ceros` meses con valor cero. Inicialmente se realizó un análisis de estadísticos descriptivos para entender cómo estaba compuesta la base de datos y si había características que se tenían que mejorar; como se contaba con varios ceros y existía la posibilidad de aplicar transformaciones, se sumó 0.001 a todos los datos. Luego, al observar la serie en el tiempo, se decidió no aplicar una transformación logarítmica para estabilizar la varianza, porque la varianza se mantiene constante conforme aumenta el tiempo.
+
+Con la serie preparada se ajustaron modelos de cada familia. En la familia de suavizamiento exponencial se ajustaron un modelo de suavizamiento exponencial simple (SES), que se utiliza para series sin tendencia y sin estacionalidad, y un Holt-Winters aditivo, que modela una estacionalidad constante a lo largo del tiempo (Hyndman y Athanasopoulos, 2021). El finalista de esta familia fue el SES, que pronostica con un nivel que se actualiza como un promedio ponderado entre la última observación y el nivel anterior:
+
+\[
+l_t = 0.5221\, y_t + 0.4779\, l_{t-1}, \qquad \hat{y}_{t+h} = l_t
+\]
+
+\noindent donde $y_t$ es la observación en el tiempo $t$ y $l_t$ es el nivel suavizado. En la familia ARIMA/SARIMA se observaron las funciones de autocorrelación (ACF) y autocorrelación parcial (PACF) y se aplicó el contraste de Dickey-Fuller para saber si la serie es estacionaria. A partir de ahí se ajustaron modelos ARMA, a cada uno se le revisaron las raíces inversas, y al seleccionado según las mejores métricas se le aplicó la prueba de los residuales y la revisión del supuesto de normalidad. El finalista fue un ARMA(3,1), que explica cada valor con los tres valores anteriores de la serie y el error del mes anterior, y supone que los errores $a_t$ son ruido blanco:
+
+\[
+y_t = 80.627 + 1.1369\, y_{t-1} - 0.2135\, y_{t-2} + 0.0603\, y_{t-3} + a_t - 0.5595\, a_{t-1}
+\]
+
+Respecto a la familia de regresión, como ya se había comprobado que la serie es estacionaria, se observó el periodograma. La serie no muestra una tendencia monótona, pero sí oscilaciones recurrentes de gran amplitud, y el periodograma presenta su máximo en un período de `r round(1/frecuencia, 1)` meses (≈ `r round(1/frecuencia/12, 1)` años), que corresponde al ciclo solar. Por lo tanto, la serie exhibe un ciclo cuasiperiódico y no una estacionalidad de período fijo, por lo que se usaron términos de Fourier con frecuencias estimadas a partir de los datos: se tomaron las 5 frecuencias más altas del periodograma y se ajustaron 5 modelos de regresión, cada uno con un seno y un coseno más que el anterior. El finalista fue el modelo con las 5 frecuencias, que supone que el ciclo se repite siempre con la misma forma:
+
+\[
+\begin{aligned}
+y_t = {} & 82.218 - 31.321\cos(2\pi f_1 t) + 25.380\sin(2\pi f_1 t) + 31.806\cos(2\pi f_2 t) + 1.736\sin(2\pi f_2 t) \\
+& + 8.124\cos(2\pi f_3 t) - 26.172\sin(2\pi f_3 t) - 23.286\cos(2\pi f_4 t) - 13.778\sin(2\pi f_4 t) \\
+& + 1.618\cos(2\pi f_5 t) + 24.164\sin(2\pi f_5 t) + \epsilon_t
+\end{aligned}
+\]
+
+\noindent donde $f_1, \dots, f_5$ son las frecuencias del periodograma, con periodos de `r paste(round(1/c(frecuencia1, frecuencia2, frecuencia3, frecuencia4, frecuencia5), 1), collapse = ", ")` meses. Como los residuales de esta regresión presentaban autocorrelación, en la familia de regresión dinámica se mantuvo la misma parte de Fourier, pero sus errores se modelaron con un ARMA(p,1), con $p$ de 1 a 3, y se hizo el análisis de los residuales, de las raíces unitarias y de los supuestos de normalidad. El finalista fue la regresión de Fourier con errores ARMA(3,1), en la que los términos de Fourier describen el ciclo y la parte ARMA aprovecha la relación entre meses seguidos:
+
+\[
+\begin{gathered}
+y_t = 81.948 + \sum_{j=1}^{5} \left[ \beta_{1j}\cos(2\pi f_j t) + \beta_{2j}\sin(2\pi f_j t) \right] + \eta_t \\
+\eta_t = 1.2043\, \eta_{t-1} - 0.2678\, \eta_{t-2} + 0.0415\, \eta_{t-3} + a_t - 0.6748\, a_{t-1}
+\end{gathered}
+\]
+
+Como cada familia se evaluó con criterios propios, los cuatro finalistas se compararon entre sí por su capacidad de pronóstico. Para esto, los últimos 132 meses de la serie (noviembre 2015 a octubre 2026, aproximadamente un ciclo solar) se guardaron como datos de prueba, y los finalistas se volvieron a ajustar solo con los datos de entrenamiento (enero 1749 a octubre 2015); en el caso de los modelos de Fourier, las frecuencias también se buscaron solo con los datos de entrenamiento. Después se compararon los pronósticos con los datos de prueba mediante el error $e_t = y_t - \hat{y}_t$:
+
+\[
+RMSE = \sqrt{\frac{1}{h}\sum_{i=1}^{h} e_{T+i}^2}, \qquad MAE = \frac{1}{h}\sum_{i=1}^{h} \left| e_{T+i} \right|
+\]
+
+\noindent donde $h = 132$ es el número de meses de prueba. Se eligió el modelo con menor RMSE, y no se usó el MAPE porque la serie tiene meses con cero manchas, en los que el error porcentual se vuelve muy grande.
+
+En cuanto al software, todo el procesamiento y el análisis se realizaron en R, versión 4.6.1 (R Core Team, 2026). Los datos se importaron con el paquete readxl, versión 1.6.0 (Wickham y Bryan, 2026), y se manipularon con dplyr, versión 1.2.1 (Wickham et al., 2026). Los modelos de suavizamiento exponencial simple, Holt-Winters aditivo y ARIMA, así como el diagnóstico de los residuales mediante la prueba de Ljung-Box, se ajustaron con el paquete forecast, versión 9.0.2 (Hyndman et al., 2026), junto con fpp2, versión 2.5.1 (Hyndman, 2026). El periodograma se estimó con astsa, versión 2.5 (Stoffer y Poison, 2026); la prueba de Dickey-Fuller aumentada se aplicó con tseries, versión 0.10-63 (Trapletti y Hornik, 2026); el gráfico de normalidad se hizo con car, versión `r packageVersion("car")` (Fox y Weisberg, 2019); los gráficos se elaboraron con ggplot2, versión 4.0.4 (Wickham, 2016), y las tablas con kableExtra, versión `r packageVersion("kableExtra")` (Zhu, 2024).
+
+# RESULTADOS
+
+Inicialmente se observaron los estadísticos importantes de los datos (ver Tabla \ref{tab:tabla1}).
+
+```{r tabla1, results="asis"}
+resumen = summary(datos)
+tabla1 = data.frame(
+  Estadístico = c("Min", "1st Qu", "Median", "Mean", "3rd Qu", "Max"),
+  Año     = as.character(round(as.numeric(summary(datos$Año)), 3)),
+  Mes     = as.character(round(as.numeric(summary(datos$Mes)), 3)),
+  Sunspot = as.character(round(as.numeric(summary(datos$Sunspot)), 3))
+)
+tabla_apa(tabla1, "Estadísticos descriptivos", "Elaboración propia con datos de SILSO.")
+```
+
+El número de manchas solares va de `r round(min(datos$Sunspot), 3)` a `r round(max(datos$Sunspot), 3)`, con una media de `r round(mean(datos$Sunspot), 3)` y una mediana menor, de `r round(median(datos$Sunspot), 3)`, lo que indica que la mayoría de los meses tiene una actividad baja o moderada y que unos pocos meses, cerca de los máximos de cada ciclo, alcanzan valores muy altos. Al sumar 0.001 a los datos para quitar los ceros no hubo cambios en la forma de la serie, que se observa en la Figura \ref{fig:serie}: no presenta una tendencia creciente ni decreciente conforme aumenta el tiempo, sino ondulaciones que se repiten aproximadamente cada 11 años, con máximos de distinta altura en cada ciclo.
+
+```{r serie, fig.cap="Serie de tiempo de manchas solares mensuales durante 1749 a 2026"}
+autoplot(y) + labs(x = "Año", y = "Número de manchas solares") + theme_bw()
+```
+
+```{r}
+##Suavizamiento exponencial simple
+ses1=ses(y, h=12, initial="simple")
+ses1$model
+```
+
+```{r}
+# No veo aumento de varianza, por lo que aplicaré una descomposición aditiva.
+descomp1= decompose(y, type="additive")
+```
+
+```{r}
+# En modelos de suavizamiento aplicaría Holt-Winters aditivo
+ht1 <- hw(y,type="additive")
+ht1$model
+```
+
+En la familia de suavizamiento exponencial se ajustó un SES, dado que la serie no presenta tendencia ni estacionalidad, y un Holt-Winters aditivo, elegido a partir de una descomposición aditiva, porque la variabilidad mensual no aumenta con el tiempo y las ondulaciones mantienen el mismo grosor (ver Figuras \ref{fig:anexo-ses}, \ref{fig:anexo-descomp} y \ref{fig:anexo-hw} en el Anexo). Como se observa en la Tabla \ref{tab:tabla2}, las métricas de ambos modelos son muy parecidas: el RMSE del Holt-Winters es apenas menor, pero el SES tiene un MAE menor y un sesgo (ME) mucho más cercano a cero. Además, el componente estacional del Holt-Winters es casi nulo, porque la serie no tiene estacionalidad mensual, por lo que se eligió el SES al ser el modelo más sencillo con un desempeño equivalente.
+
+```{r tabla2, results="asis"}
+# Comparativa HW y SES
+tabla2 = data.frame(
+  Modelo = c("SES", "HW aditivo"),
+  RMSE = round(c(accuracy(ses1)[, "RMSE"], accuracy(ht1)[, "RMSE"]), 3),
+  ME   = round(c(accuracy(ses1)[, "ME"],   accuracy(ht1)[, "ME"]), 4),
+  MAE  = round(c(accuracy(ses1)[, "MAE"],  accuracy(ht1)[, "MAE"]), 3),
+  AIC  = c("-", round(ht1$model$aic, 2)),
+  BIC  = c("-", round(ht1$model$bic, 2))
+)
+tabla_apa(tabla2, "Comparativa de modelos de suavizamiento exponencial",
+          "Métricas de ajuste con toda la serie. El SES con valor inicial simple no tiene AIC ni BIC.")
+```
+
+```{r}
+prueba_adf = adf.test(y)
+prueba_adf
+```
+
+Para la familia ARIMA/SARIMA se observaron las funciones de autocorrelación (ver Figura \ref{fig:acf50} y Figura \ref{fig:acf1000} en el Anexo). La ACF presenta un decaimiento lento de los rezagos hacia cero y, con más rezagos, oscila con un periodo cercano a 11 años, mientras que la PACF tiene un decaimiento mucho más rápido. Además, la prueba de Dickey-Fuller (estadístico = `r round(prueba_adf$statistic, 3)`) dio un p-value menor a 0.05, por lo que se rechaza la hipótesis nula de que la serie tiene raíz unitaria y se determina que la serie es estacionaria, sin necesidad de diferenciarla. Con base en esto se compararon los modelos ARMA(1,1), ARMA(2,1) y ARMA(3,1), cuyas raíces inversas se encuentran dentro del círculo unitario (ver Figuras \ref{fig:anexo-raices1}, \ref{fig:anexo-raices2} y \ref{fig:anexo-raices3} en el Anexo).
+
+```{r acf50, fig.cap="Funciones de autocorrelación ACF y PACF con 50 rezagos", fig.height=4.5}
+invisible(acf2(y, 50, main = ""))
+```
+
+```{r}
+# Yo aplicaría un ARMA(1,1), pero también se prueban ARMA(2,1) y ARMA(3,1)
+modb=Arima(y, order=c(3,0,1))
+summary(modb)
+```
+
+```{r}
+modc=Arima(y, order=c(2,0,1))
+summary(modc)
+```
+
+```{r}
+modd=Arima(y, order=c(1,0,1))
+summary(modd)
+```
+
+```{r tabla3, results="asis"}
+metricas_arima = function(m) {
+  c(round(accuracy(m)[, c("RMSE", "ME", "MAE")], 4), AIC = round(m$aic, 2), BIC = round(m$bic, 2))
+}
+tabla3 = data.frame(Modelo = c("ARMA(1,1)", "ARMA(2,1)", "ARMA(3,1)"),
+                    rbind(metricas_arima(modd), metricas_arima(modc), metricas_arima(modb)))
+tabla_apa(tabla3, "Comparativa de modelos de ARIMA/SARIMA", "Métricas de ajuste con toda la serie.")
+```
+
+```{r}
+# Ganador modb
+lb_modb = checkresiduals(modb, plot = FALSE)
+# Tiene errores correlacionados
+res=modb$res
+```
+
+Según la Tabla \ref{tab:tabla3}, el ARMA(3,1) tiene el menor RMSE, el menor MAE y el menor AIC; aunque las diferencias con los otros dos modelos son pequeñas, por tener mejores métricas y mayor ajuste se eligió como finalista. Sin embargo, la prueba de Ljung-Box generó un p-value < 0.001, lo que evidencia que sus residuales siguen correlacionados (ver Figura \ref{fig:anexo-resarma} en el Anexo), y los otros dos candidatos presentan el mismo problema. Esta autocorrelación sugiere que quedan patrones de largo plazo, como el ciclo solar, que un ARMA de orden bajo no logra captar.
+
+Por esta razón, en la familia de regresión se buscó incluir el ciclo de forma directa. Para esto se observó el periodograma (ver Figura \ref{fig:periodograma}), que muestra en qué frecuencias la serie presenta la mayor cantidad de oscilaciones; su máximo corresponde a un periodo de `r round(1/frecuencia, 1)` meses. Un primer modelo con un solo seno y coseno de esa frecuencia ya reproduce la forma general del ciclo (ver Figura \ref{fig:anexo-unafrec} en el Anexo), por lo que se seleccionaron las 5 frecuencias más altas y se ajustaron 5 modelos, cada uno con una frecuencia más que el anterior (ver Tabla \ref{tab:tabla4}).
+
+```{r periodograma, fig.cap="Periodograma de la serie de manchas solares"}
+# La serie es estacionaria. Dada la estructura de la serie, se usará regresión de Fourier.
+x=datos$Sunspot
+x.spec=mvspec(x, log="no", plot=FALSE)
+plot(x.spec$freq, x.spec$spec, type = "l", xlim = c(0, 0.05),
+     xlab = "Frecuencia (ciclos por mes)", ylab = "Periodograma")
+frecuencia<-x.spec$freq[x.spec$spec==max(x.spec$spec)]
+abline(v=frecuencia,col=2)
+```
+
+```{r}
+1/frecuencia
+# La estacionalidad tiene repitencia aproximadamente cada 11 años
+t <- seq_along(y)
+cos1<-cos(2*pi*frecuencia*t)
+sin1<-sin(2*pi*frecuencia*t)
+data=data.frame(x=x,time=t,cos=cos1,sen=sin1)
+mod<-lm(x~cos1+sin1,data=data)
+```
+
+```{r}
+spectro_orden <- x.spec$details %>% as.data.frame() %>% arrange(desc(spectrum))
+spectro_orden[1:8,]
+```
+
+```{r}
+#Ajuste de frecuencias
+frecuencia1 <- spectro_orden$frequency[1]
+frecuencia2 <- spectro_orden$frequency[2]
+frecuencia3 <- spectro_orden$frequency[3]
+frecuencia4 <- spectro_orden$frequency[4]
+frecuencia5 <- spectro_orden$frequency[5]
+cos1<-cos(2*pi*frecuencia1*t)
+sin1<-sin(2*pi*frecuencia1*t)
+cos2<-cos(2*pi*frecuencia2*t)
+sin2<-sin(2*pi*frecuencia2*t)
+cos3<-cos(2*pi*frecuencia3*t)
+sin3<-sin(2*pi*frecuencia3*t)
+cos4<-cos(2*pi*frecuencia4*t)
+sin4<-sin(2*pi*frecuencia4*t)
+cos5<-cos(2*pi*frecuencia5*t)
+sin5<-sin(2*pi*frecuencia5*t)
+```
+
+```{r}
+mod1<-lm(x~cos1+sin1,data=data)
+mod2<-lm(x~cos1+sin1+cos2+sin2,data=data)
+mod3<-lm(x~cos1+sin1+cos2+sin2+cos3+sin3,data=data)
+mod4<-lm(x~cos1+sin1+cos2+sin2+cos3+sin3+cos4+sin4,data=data)
+mod5<-lm(x~cos1+sin1+cos2+sin2+cos3+sin3+cos4+sin4+cos5+sin5,data=data)
+summary(mod5)
+```
+
+```{r tabla4, results="asis"}
+metricas_lm = function(m) {
+  e = residuals(m)
+  c(RMSE = round(sqrt(mean(e^2)), 4), ME = round(mean(e), 4), MAE = round(mean(abs(e)), 4),
+    AIC = round(AIC(m), 2), BIC = round(BIC(m), 2))
+}
+tabla4 = data.frame(Modelo = paste(1:5, "frec"),
+                    rbind(metricas_lm(mod1), metricas_lm(mod2), metricas_lm(mod3),
+                          metricas_lm(mod4), metricas_lm(mod5)))
+tabla_apa(tabla4, "Comparativa de modelos de regresión simple",
+          "Métricas de ajuste con toda la serie. El ME de una regresión con intercepto es cero por construcción.")
+```
+
+```{r}
+# Se observa que el mejor modelo es el mod5. Sin embargo, se realizará un análisis de los residuales.
+bg_mod5 = checkresiduals(mod5, plot = FALSE)
+```
+
+En la Tabla \ref{tab:tabla4} se observa que el modelo con las 5 frecuencias tiene el RMSE, el MAE, el AIC y el BIC más bajos, por lo que fue el finalista de esta familia. Aun así, al realizarle la prueba de Breusch-Godfrey se rechazó la hipótesis nula con un p-value < 0.001, lo que indica que sus errores presentan autocorrelación, como también se observa en el análisis de sus residuales (ver Figura \ref{fig:resmod5}).
+
+```{r resmod5, fig.cap="Análisis de los residuales del modelo de regresión simple", fig.height=4.5}
+checkresiduals(mod5)
+# Los residuales presentan autocorrelación
+```
+
+```{r}
+res=mod5$residuals
+# Lo usual sería ajustar un modelo de regresión de Fourier con un ARIMA en los residuales.
+xr=cbind(cos1<-cos(2*pi*frecuencia1*t),
+sin1<-sin(2*pi*frecuencia1*t),
+cos2<-cos(2*pi*frecuencia2*t),
+sin2<-sin(2*pi*frecuencia2*t),
+cos3<-cos(2*pi*frecuencia3*t),
+sin3<-sin(2*pi*frecuencia3*t),
+cos4<-cos(2*pi*frecuencia4*t),
+sin4<-sin(2*pi*frecuencia4*t),
+cos5<-cos(2*pi*frecuencia5*t),
+sin5<-sin(2*pi*frecuencia5*t)
+)
+```
+
+```{r}
+#Ajuste de modelos
+fit1= Arima(x, xreg=xr, order=c(1,0,1))
+fit2= Arima(x, xreg=xr, order=c(2,0,1))
+fit3= Arima(x, xreg=xr, order=c(3,0,1))
+summary(fit3)
+# Nos quedamos con el fit 3.
+lb_fit3 = checkresiduals(fit3, plot = FALSE)
+# se rechaza la hipótesis nula, entonces los residuales no son ruido blanco.
+#Normalidad
+sw_fit3 = shapiro.test(fit3$residuals)
+```
+
+Esa autocorrelación es precisamente la que aprovecha la regresión dinámica. La ACF de los residuales de la regresión presenta un decaimiento pronunciado y la PACF un decaimiento exponencial (ver Figura \ref{fig:anexo-acfres} en el Anexo), un patrón que sugiere un ARMA(1,1), por lo que se ajustó la regresión de Fourier con errores ARMA(1,1), ARMA(2,1) y ARMA(3,1) (ver Tabla \ref{tab:tabla5}). El modelo con errores ARMA(3,1) obtuvo el menor RMSE y el menor AIC, y fue el finalista de esta familia. Aunque mejora de forma importante a la regresión simple, la prueba de Ljung-Box indica que sus errores siguen autocorrelacionados (p-value `r ifelse(lb_fit3$p.value < 0.001, "< 0.001", paste("=", round(lb_fit3$p.value, 3)))`) y la prueba de Shapiro-Wilk indica que no siguen una distribución normal (p-value `r ifelse(sw_fit3$p.value < 0.001, "< 0.001", paste("=", round(sw_fit3$p.value, 3)))`; ver Figura \ref{fig:anexo-qqplot} en el Anexo), mientras que sus raíces inversas se encuentran dentro del círculo unitario (ver Figura \ref{fig:anexo-raicesfit3} en el Anexo).
+
+```{r tabla5, results="asis"}
+tabla5 = data.frame(Modelo = c("ARMA(1,1)", "ARMA(2,1)", "ARMA(3,1)"),
+                    rbind(metricas_arima(fit1), metricas_arima(fit2), metricas_arima(fit3)))
+tabla_apa(tabla5, "Comparativa de modelos de regresión de Fourier con errores ARMA(p,1)",
+          "Métricas de ajuste con toda la serie.")
+```
+
+Al comparar los valores ajustados de este modelo con la serie original (ver Figura \ref{fig:ajustefit3}), se observa que sigue de cerca el comportamiento de la serie a lo largo de todo el periodo, tanto en los máximos como en los mínimos de cada ciclo.
+
+```{r ajustefit3, fig.cap="Comportamiento del modelo de regresión de Fourier con errores ARMA(3,1) frente a la serie"}
+plot(datos$Sunspot~t,type="l", ylab="Número de manchas solares",xlab="Tiempo (meses)")
+points(t,fitted(fit3),type="l",col=2,lwd=2)
+```
+
+Una vez elegido el finalista de cada familia, los cuatro modelos se ajustaron con los datos de entrenamiento y se pronosticaron los 132 meses de prueba. Los errores de pronóstico se presentan en la Tabla \ref{tab:tabla6}: el modelo con menor error fue `r ganador`, con un RMSE de `r rmse_ganador` y un MAE de `r mae_ganador`. La Figura \ref{fig:pronprueba} ayuda a entender estas diferencias, ya que el SES y el ARMA(3,1) pronostican casi una línea recta después de pocos meses, porque no tienen forma de saber que viene un nuevo ciclo, mientras que los modelos con senos y cosenos sí intentan seguir la forma del ciclo solar.
+
+```{r tabla6, results="asis"}
+tabla6 = comparativa
+tabla6[, 3:5] = round(tabla6[, 3:5], 2)
+tabla_apa(tabla6, "Comparativa de los modelos finalistas con los datos de prueba",
+          "Errores de pronóstico de noviembre 2015 a octubre 2026 (132 meses), en la escala original de la serie.")
+```
+
+```{r pronprueba, fig.cap="Pronósticos de los modelos finalistas contra los datos de prueba", fig.height=4.2}
+inicio = c(2015, 11)
+autoplot(window(y, start = 1990), series = "Datos reales") +
+  autolayer(ts(ses_e$mean, start = inicio, frequency = 12), series = "SES") +
+  autolayer(ts(pron_modb$mean, start = inicio, frequency = 12), series = "ARMA(3,1)") +
+  autolayer(ts(pron_mod5[, "fit"], start = inicio, frequency = 12), series = "Fourier") +
+  autolayer(ts(pron_fit3$mean, start = inicio, frequency = 12), series = "Fourier + ARMA(3,1)") +
+  scale_colour_manual(values = c("Datos reales" = "grey50", "SES" = "#E69F00", "ARMA(3,1)" = "#0072B2",
+                                 "Fourier" = "#009E73", "Fourier + ARMA(3,1)" = "#CC79A7")) +
+  labs(x = "Año", y = "Número de manchas solares", colour = "") +
+  theme_bw() + theme(legend.position = "bottom")
+```
+
+```{r pronostico-final}
+# Se usa el modelo ganador, ajustado con toda la serie, para pronosticar 60 meses (5 años)
+h_final = 60
+t_fut = (length(y) + 1):(length(y) + h_final)
+xr_fut = cbind(cos(2*pi*frecuencia1*t_fut), sin(2*pi*frecuencia1*t_fut),
+               cos(2*pi*frecuencia2*t_fut), sin(2*pi*frecuencia2*t_fut),
+               cos(2*pi*frecuencia3*t_fut), sin(2*pi*frecuencia3*t_fut),
+               cos(2*pi*frecuencia4*t_fut), sin(2*pi*frecuencia4*t_fut),
+               cos(2*pi*frecuencia5*t_fut), sin(2*pi*frecuencia5*t_fut))
+
+if (ganador == "SES") {
+  pf = ses(y, h = h_final, initial = "simple")
+  pron_final = data.frame(media = pf$mean, li = pf$lower[, 2], ls = pf$upper[, 2])
+} else if (ganador == "ARMA(3,1)") {
+  pf = forecast(modb, h = h_final)
+  pron_final = data.frame(media = pf$mean, li = pf$lower[, 2], ls = pf$upper[, 2])
+} else if (ganador == "Fourier (5 frecuencias)") {
+  nuevos = data.frame(xr_fut)
+  names(nuevos) = c("cos1", "sin1", "cos2", "sin2", "cos3", "sin3", "cos4", "sin4", "cos5", "sin5")
+  pf = predict(mod5, newdata = nuevos, interval = "prediction")
+  pron_final = data.frame(media = pf[, "fit"], li = pf[, "lwr"], ls = pf[, "upr"])
+} else {
+  pf = forecast(fit3, xreg = xr_fut)
+  pron_final = data.frame(media = pf$mean, li = pf$lower[, 2], ls = pf$upper[, 2])
+}
+pron_final$fecha = seq(2026 + 10/12, by = 1/12, length.out = h_final)
+```
+
+Por último, con el modelo `r ganador` ajustado con toda la serie se pronosticaron los próximos 60 meses, de noviembre 2026 a octubre 2031 (ver Figura \ref{fig:pronfinal} y Tabla \ref{tab:tabla7}). Se observa que el intervalo de predicción se amplía conforme aumenta el horizonte, lo que refleja la mayor incertidumbre del pronóstico a largo plazo; además, varios límites inferiores resultan negativos y se pusieron en cero, porque no puede haber un número negativo de manchas.
+
+```{r pronfinal, fig.cap="Pronóstico de manchas solares para noviembre 2026 a octubre 2031"}
+reales = data.frame(fecha = as.numeric(time(y)), y = as.numeric(y))
+ggplot() +
+  geom_line(data = subset(reales, fecha >= 1990), aes(fecha, y), colour = "grey40") +
+  geom_ribbon(data = pron_final, aes(fecha, ymin = li, ymax = ls), fill = "#0072B2", alpha = 0.25) +
+  geom_line(data = pron_final, aes(fecha, media), colour = "#0072B2", linewidth = 0.8) +
+  labs(x = "Año", y = "Número de manchas solares") + theme_bw()
+```
+
+```{r tabla7, results="asis"}
+filas = c(1, 6, 12, 24, 36, 48, 60)
+tabla7 = data.frame(
+  Mes = c("Noviembre 2026", "Abril 2027", "Octubre 2027", "Octubre 2028",
+          "Octubre 2029", "Octubre 2030", "Octubre 2031"),
+  Pronóstico = round(pron_final$media[filas], 2),
+  `Límite inferior` = round(pmax(0, pron_final$li[filas]), 2),
+  `Límite superior` = round(pron_final$ls[filas], 2),
+  check.names = FALSE
+)
+tabla_apa(tabla7, "Pronóstico e intervalo de predicción del 95 \\% para meses seleccionados",
+          "Los límites inferiores negativos se pusieron en cero, porque no puede haber manchas negativas.")
+```
+
+# CONCLUSIONES
+
+El modelo elegido para pronosticar el número medio mensual de manchas solares es `r ganador`, porque fue el que tuvo el menor error al pronosticar los 132 meses de prueba (RMSE = `r rmse_ganador`). Este resultado muestra que el mejor ajuste con toda la serie no garantiza el mejor pronóstico: el SES y el ARMA(3,1) ajustan muy bien el mes siguiente, pero a largo plazo pronostican casi un valor constante. Esto coincide con lo que explican Hyndman y Athanasopoulos (2021), quienes señalan que los pronósticos de un modelo ARMA estacionario se acercan a la media de la serie conforme aumenta el horizonte, y que para series con ciclos largos es más adecuado usar una regresión dinámica con términos de Fourier, que fue el enfoque que dio mejores resultados en este trabajo.
+
+El hallazgo principal es que la serie no tiene una estacionalidad mensual, sino un ciclo de aproximadamente 11 años que se identificó con el periodograma, lo que concuerda con el ciclo de Schwabe descrito por Hathaway (2015) y con el uso del análisis espectral para esta misma serie que presentan Shumway y Stoffer (2017). Sin embargo, el periodograma no mostró una sola frecuencia dominante, sino varias frecuencias cercanas, lo que es consistente con Hathaway (2015), quien indica que la duración de cada ciclo varía aproximadamente entre 9 y 14 años y que su amplitud también cambia de un ciclo a otro. Por esa razón, la regresión de Fourier, que supone un ciclo de forma fija, dejó residuales autocorrelacionados. Esto se relaciona con el planteamiento de Yule (1927), quien propuso los modelos autorregresivos para esta serie porque un modelo de ondas periódicas fijas no describe bien un ciclo que se perturba de un periodo a otro; en este trabajo se llegó a una conclusión parecida, ya que el mejor desempeño se obtuvo al combinar una parte periódica, los términos de Fourier, con una parte autorregresiva en los errores.
+
+Entre las limitaciones, los residuales de todos los modelos siguen autocorrelacionados y no son normales, por lo que los intervalos de predicción deben interpretarse con cuidado. Además, todos los modelos utilizados son lineales, mientras que Tong y Lim (1980) mostraron que el ciclo de manchas solares es asimétrico, porque sube más rápido de lo que baja, y que los modelos autorregresivos con umbral describen mejor ese comportamiento. Por esto, se recomienda probar modelos no lineales, como los autorregresivos con umbral o las redes neuronales autorregresivas, aplicar una transformación de raíz cuadrada para estabilizar la variabilidad en los máximos y evitar pronósticos negativos, y comparar los modelos con varios periodos de prueba para confirmar que la elección no depende de un solo ciclo.
+
+# BIBLIOGRAFÍA
+
+\begingroup
+\raggedright
+\setlength{\leftskip}{1.27cm}
+\setlength{\parindent}{-1.27cm}
+\setlength{\parskip}{0.3em}
+
+Americo Mejía, F. (2009). Manchas solares. *El Salvador Ciencia & Tecnología, 14*(19).
+
+Arsentiev, A., Hathaway, D. H. y Lessard, R. W. (2013). El soplido del viento solar: Las manchas solares, los ciclos solares y la vida en la tierra. *Oilfield Review, 25*(3).
+
+Costa, A., García, B. y Moreno, R. (s. f.). *Espectro solar y manchas solares*. Publicaciones de NASE.
+
+Fox, J. y Weisberg, S. (2019). *An R companion to applied regression* (3.ª ed.). Sage.
+
+Hathaway, D. H. (2015). The solar cycle. *Living Reviews in Solar Physics, 12*(1), 4. https://doi.org/10.1007/lrsp-2015-4
+
+Hyndman, R. J. (2026). *fpp2: Data for "Forecasting: Principles and Practice" (2nd ed.)* (Versión 2.5.1) [Paquete de R]. https://CRAN.R-project.org/package=fpp2
+
+Hyndman, R. J. y Athanasopoulos, G. (2021). *Forecasting: Principles and practice* (3.ª ed.). OTexts. https://otexts.com/fpp3/
+
+Hyndman, R. J., Athanasopoulos, G., Bergmeir, C., Caceres, G., Chhay, L., O'Hara-Wild, M., Petropoulos, F., Razbash, S., Wang, E. y Yasmeen, F. (2026). *forecast: Forecasting functions for time series and linear models* (Versión 9.0.2) [Paquete de R]. https://pkg.robjhyndman.com/forecast/
+
+R Core Team. (2026). *R: A language and environment for statistical computing* (Versión 4.6.1) [Software]. R Foundation for Statistical Computing. https://www.R-project.org/
+
+Real Observatorio de Bélgica. (2015). *Número Internacional de Manchas Solares V2.0*. SILSO. https://doi.org/10.24414/qnza-ac80
+
+Shumway, R. H. y Stoffer, D. S. (2017). *Time series analysis and its applications: With R examples* (4.ª ed.). Springer.
+
+Solar Influences Data Analysis Center. (s. f.). *Sunspot Number*. SILSO. https://www.sidc.be/SILSO/datafiles
+
+Stoffer, D. y Poison, N. (2026). *astsa: Applied statistical time series analysis* (Versión 2.5) [Paquete de R]. https://CRAN.R-project.org/package=astsa
+
+Tong, H. y Lim, K. S. (1980). Threshold autoregression, limit cycles and cyclical data. *Journal of the Royal Statistical Society: Series B (Methodological), 42*(3), 245-292.
+
+Trapletti, A. y Hornik, K. (2026). *tseries: Time series analysis and computational finance* (Versión 0.10-63) [Paquete de R]. https://CRAN.R-project.org/package=tseries
+
+Wickham, H. (2016). *ggplot2: Elegant graphics for data analysis*. Springer-Verlag New York.
+
+Wickham, H. y Bryan, J. (2026). *readxl: Read Excel files* (Versión 1.6.0) [Paquete de R]. https://CRAN.R-project.org/package=readxl
+
+Wickham, H., François, R., Henry, L., Müller, K. y Vaughan, D. (2026). *dplyr: A grammar of data manipulation* (Versión 1.2.1) [Paquete de R]. https://CRAN.R-project.org/package=dplyr
+
+Yule, G. U. (1927). On a method of investigating periodicities in disturbed series, with special reference to Wolfer's sunspot numbers. *Philosophical Transactions of the Royal Society of London. Series A, 226*, 267-298. https://doi.org/10.1098/rsta.1927.0007
+
+Zhu, H. (2024). *kableExtra: Construct complex table with 'kable' and pipe syntax* (Versión `r packageVersion("kableExtra")`) [Paquete de R]. https://CRAN.R-project.org/package=kableExtra
+
+\par\endgroup
+
+# ANEXOS
+
+El código en R Markdown que genera este artículo y los datos utilizados se encuentran en el siguiente repositorio de GitHub: <https://github.com/argueta0397-svg/manchas-solares-series-tiempo>.
+
+```{=latex}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{A\arabic{figure}}
+```
+
+```{r anexo-ses, fig.cap="Predicción mediante un modelo de suavizamiento exponencial simple"}
+autoplot(ses1) + labs(title = NULL, x = "Año", y = "Número de manchas solares") + theme_bw()
+```
+
+```{r anexo-descomp, fig.cap="Descomposición aditiva de la serie", fig.height=5}
+autoplot(descomp1) + labs(title = NULL, x = "Año") + theme_bw()
+```
+
+```{r anexo-hw, fig.cap="Predicción con un modelo Holt-Winters aditivo"}
+autoplot(y) +
+  autolayer(ht1, series="HW aditivo", PI=FALSE, size = 0.2) +
+  labs(x = "Año", y = "Número de manchas solares") + theme_bw()
+```
+
+```{r acf1000, fig.cap="Funciones de autocorrelación ACF y PACF con 1000 rezagos", fig.height=4.5}
+invisible(acf2(y, 1000, main = ""))
+```
+
+```{r anexo-raices1, fig.cap="Raíces inversas modelo ARIMA(1,0,1)", fig.height=3.5}
+autoplot(modd) + theme_bw()
+```
+
+```{r anexo-raices2, fig.cap="Raíces inversas modelo ARIMA(2,0,1)", fig.height=3.5}
+autoplot(modc) + theme_bw()
+```
+
+```{r anexo-raices3, fig.cap="Raíces inversas modelo ARIMA(3,0,1)", fig.height=3.5}
+autoplot(modb) + theme_bw()
+```
+
+```{r anexo-resarma, fig.cap="Análisis de residuales del ARMA(3,1)", fig.height=4.5}
+checkresiduals(modb)
+```
+
+```{r anexo-unafrec, fig.cap="Comparación de la serie original contra el modelo con una frecuencia"}
+plot(datos$Sunspot~t,type="l", ylab="Número de manchas solares",xlab="Tiempo (meses)")
+points(t,fitted(mod),type="l",col=2,lwd=2)
+```
+
+```{r anexo-acfres, fig.cap="Funciones ACF y PACF de los residuales del modelo de regresión simple", fig.height=4.5}
+invisible(acf2(res, main = ""))
+```
+
+```{r anexo-qqplot, fig.cap="Gráfico de normalidad de los residuales del modelo de regresión de Fourier con errores ARMA(3,1)", fig.width=5, fig.height=4, out.width="60%"}
+qqPlot(fit3$residuals, ylab = "Residuales", xlab = "Cuantiles normales")
+```
+
+```{r anexo-raicesfit3, fig.cap="Raíces inversas del modelo de regresión de Fourier con errores ARMA(3,1)", fig.height=3.5}
+autoplot(fit3) + theme_bw()
+```
