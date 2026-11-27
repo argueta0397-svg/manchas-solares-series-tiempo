@@ -193,40 +193,40 @@ Los datos provienen del Solar Influences Data Analysis Center, que cuenta con ba
 
 Con la serie preparada se ajustaron modelos de cada familia. En la familia de suavizamiento exponencial se ajustaron un modelo de suavizamiento exponencial simple (SES), que se utiliza para series sin tendencia y sin estacionalidad, y un Holt-Winters aditivo, que modela una estacionalidad constante a lo largo del tiempo (Hyndman y Athanasopoulos, 2021). El finalista de esta familia fue el SES, que pronostica con un nivel que se actualiza como un promedio ponderado entre la última observación y el nivel anterior:
 
-\[
+\begin{equation}
 l_t = 0.5221\, y_t + 0.4779\, l_{t-1}, \qquad \hat{y}_{t+h} = l_t
-\]
+\end{equation}
 
 \noindent donde $y_t$ es la observación en el tiempo $t$ y $l_t$ es el nivel suavizado. En la familia ARIMA/SARIMA se observaron las funciones de autocorrelación (ACF) y autocorrelación parcial (PACF) y se aplicó el contraste de Dickey-Fuller para saber si la serie es estacionaria. A partir de ahí se ajustaron modelos ARMA, a cada uno se le revisaron las raíces inversas, y al seleccionado según las mejores métricas se le aplicó la prueba de los residuales y la revisión del supuesto de normalidad. El finalista fue un ARMA(3,1), que explica cada valor con los tres valores anteriores de la serie y el error del mes anterior, y supone que los errores $a_t$ son ruido blanco:
 
-\[
+\begin{equation}
 y_t = 80.627 + 1.1369\, y_{t-1} - 0.2135\, y_{t-2} + 0.0603\, y_{t-3} + a_t - 0.5595\, a_{t-1}
-\]
+\end{equation}
 
 Respecto a la familia de regresión, como ya se había comprobado que la serie es estacionaria, se observó el periodograma. La serie no muestra una tendencia monótona, pero sí oscilaciones recurrentes de gran amplitud, y el periodograma presenta su máximo en un período de `r round(1/frecuencia, 1)` meses (≈ `r round(1/frecuencia/12, 1)` años), que corresponde al ciclo solar. Por lo tanto, la serie exhibe un ciclo cuasiperiódico y no una estacionalidad de período fijo, por lo que se usaron términos de Fourier con frecuencias estimadas a partir de los datos: se tomaron las 5 frecuencias más altas del periodograma y se ajustaron 5 modelos de regresión, cada uno con un seno y un coseno más que el anterior. El finalista fue el modelo con las 5 frecuencias, que supone que el ciclo se repite siempre con la misma forma:
 
-\[
+\begin{equation}
 \begin{aligned}
 y_t = {} & 82.218 - 31.321\cos(2\pi f_1 t) + 25.380\sin(2\pi f_1 t) + 31.806\cos(2\pi f_2 t) + 1.736\sin(2\pi f_2 t) \\
 & + 8.124\cos(2\pi f_3 t) - 26.172\sin(2\pi f_3 t) - 23.286\cos(2\pi f_4 t) - 13.778\sin(2\pi f_4 t) \\
 & + 1.618\cos(2\pi f_5 t) + 24.164\sin(2\pi f_5 t) + \epsilon_t
 \end{aligned}
-\]
+\end{equation}
 
 \noindent donde $f_1, \dots, f_5$ son las frecuencias del periodograma, con periodos de `r paste(round(1/c(frecuencia1, frecuencia2, frecuencia3, frecuencia4, frecuencia5), 1), collapse = ", ")` meses. Como los residuales de esta regresión presentaban autocorrelación, en la familia de regresión dinámica se mantuvo la misma parte de Fourier, pero sus errores se modelaron con un ARMA(p,1), con $p$ de 1 a 3, y se hizo el análisis de los residuales, de las raíces unitarias y de los supuestos de normalidad. El finalista fue la regresión de Fourier con errores ARMA(3,1), en la que los términos de Fourier describen el ciclo y la parte ARMA aprovecha la relación entre meses seguidos:
 
-\[
+\begin{equation}
 \begin{gathered}
 y_t = 81.948 + \sum_{j=1}^{5} \left[ \beta_{1j}\cos(2\pi f_j t) + \beta_{2j}\sin(2\pi f_j t) \right] + \eta_t \\
 \eta_t = 1.2043\, \eta_{t-1} - 0.2678\, \eta_{t-2} + 0.0415\, \eta_{t-3} + a_t - 0.6748\, a_{t-1}
 \end{gathered}
-\]
+\end{equation}
 
 Como cada familia se evaluó con criterios propios, los cuatro finalistas se compararon entre sí por su capacidad de pronóstico. Para esto, los últimos 132 meses de la serie (noviembre 2015 a octubre 2026, aproximadamente un ciclo solar) se guardaron como datos de prueba, y los finalistas se volvieron a ajustar solo con los datos de entrenamiento (enero 1749 a octubre 2015); en el caso de los modelos de Fourier, las frecuencias también se buscaron solo con los datos de entrenamiento. Después se compararon los pronósticos con los datos de prueba mediante el error $e_t = y_t - \hat{y}_t$:
 
-\[
+\begin{equation}
 RMSE = \sqrt{\frac{1}{h}\sum_{i=1}^{h} e_{T+i}^2}, \qquad MAE = \frac{1}{h}\sum_{i=1}^{h} \left| e_{T+i} \right|
-\]
+\end{equation}
 
 \noindent donde $h = 132$ es el número de meses de prueba. Se eligió el modelo con menor RMSE, y no se usó el MAPE porque la serie tiene meses con cero manchas, en los que el error porcentual se vuelve muy grande.
 
